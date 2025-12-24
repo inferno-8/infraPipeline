@@ -1,0 +1,127 @@
+name: infra-pipeline
+
+trigger: none
+
+pool: AgenticAI
+
+variables:
+  def_path: $(System.DefaultWorkingDirectory)/environment/dev
+  tf_plan_file: tfplan
+
+stages:
+# ---------------- INIT / VALIDATE / PLAN ----------------
+- stage: initValidatePlan
+  displayName: Init, Validate and Plan
+  jobs:
+  - job: terraformPlan
+    displayName: Terraform Init Validate Plan
+    steps:
+    - task: TerraformTask@5
+      displayName: Terraform Init
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(def_path)'
+        backendServiceArm: 'wif-connect'
+        backendAzureRmStorageAccountName: 'storageassig1912'
+        backendAzureRmContainerName: 'blobcon'
+        backendAzureRmKey: 'dev.rahul.tfstate'
+
+    - task: TerraformTask@5
+      displayName: Terraform Validate
+      inputs:
+        provider: 'azurerm'
+        command: 'validate'
+        workingDirectory: '$(def_path)'
+
+    - task: TerraformTask@5
+      displayName: Terraform Plan
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        workingDirectory: '$(def_path)'
+        environmentServiceNameAzureRM: 'wif-connect'
+        commandOptions: '-out=$(tf_plan_file)'
+
+    - task: PublishPipelineArtifact@1
+      displayName: Publish Terraform Plan
+      inputs:
+        targetPath: '$(def_path)/$(tf_plan_file)'
+        artifact: 'terraform-plan'
+
+# ---------------- SECURITY SCAN ----------------
+- stage: securityScan
+  displayName: Security Scan
+  dependsOn: initValidatePlan
+  jobs:
+  - job: tfsec
+    displayName: tfsec
+    steps:
+    - task: tfsec@1
+      displayName: Run tfsec
+      inputs:
+        version: 'v1.26.0'
+        publishTestResults: false
+        dir: '$(System.DefaultWorkingDirectory)'
+
+  - job: tflint
+    displayName: tflint
+    steps:
+    - task: CmdLine@2
+      displayName: Run tflint
+      continueOnError: true
+      inputs:
+        script: 'tflint --recursive --format junit > tflint-out.xml'
+        workingDirectory: '$(System.DefaultWorkingDirectory)'
+
+    - task: PublishTestResults@2
+      displayName: Publish tflint Results
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: 'tflint-out.xml'
+        testRunTitle: 'tflint'
+
+# ---------------- APPROVAL & APPLY ----------------
+- stage: approvalAndApply
+  displayName: Approval and Apply
+  dependsOn: securityScan
+  jobs:
+  - job: approval
+    displayName: Manual Approval
+    pool: server
+    steps:
+    - task: ManualValidation@1
+      displayName: Await Approval
+      inputs:
+        notifyUsers: 'rahuldevopseng@gmail.com'
+        approvers: 'rahuldevopseng@gmail.com'
+
+  - job: apply
+    displayName: Terraform Apply
+    dependsOn: approval
+    steps:
+    - task: DownloadPipelineArtifact@2
+      displayName: Download Terraform Plan
+      inputs:
+        artifact: 'terraform-plan'
+        path: '$(def_path)'
+
+    - task: TerraformTask@5
+      displayName: Terraform Init
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(def_path)'
+        backendServiceArm: 'wif-connect'
+        backendAzureRmStorageAccountName: 'storageassig1912'
+        backendAzureRmContainerName: 'blobcon'
+        backendAzureRmKey: 'dev.rahul.tfstate'
+
+    - task: TerraformTask@5
+      displayName: Terraform Apply
+      inputs:
+        provider: 'azurerm'
+        command: 'apply'
+        workingDirectory: '$(def_path)'
+        environmentServiceNameAzureRM: 'wif-connect'
+        commandOptions: '-auto-approve $(tf_plan_file)'
